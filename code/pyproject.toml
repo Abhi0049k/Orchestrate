@@ -1,0 +1,18 @@
+[project]
+name = "code"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "faiss-cpu>=1.13.2",
+    "fastapi>=0.136.1",
+    "langchain>=1.2.17",
+    "langchain-community>=0.4.1",
+    "langchain-ollama>=1.1.0",
+    "numpy>=2.4.4",
+    "packaging>=26.2",
+    "pydantic>=2.13.3",
+    "redis>=7.4.0",
+    "uvicorn>=0.46.0",
+]
