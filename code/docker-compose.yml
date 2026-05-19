@@ -11,14 +11,5 @@ services:
     command: redis-server --appendonly yes
     restart: unless-stopped
 
-  faiss_db:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: orchestrate_faiss
-    ports:
-      - "8000:8000"
-    restart: unless-stopped
-
 volumes:
   redis_data:

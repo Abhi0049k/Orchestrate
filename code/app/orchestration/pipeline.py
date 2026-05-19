@@ -53,18 +53,12 @@ def process_ticket(ticket_text: str, cache: TicketCache) -> Dict[str, Any]:
         domain_filter = product_area if product_area in ["hackerrank", "claude", "visa"] else None
         retrieved_chunks = hybrid_search(ticket_text, domain_filter=domain_filter, top_k=3)
         
-        best_distance = retrieved_chunks[0]['distance'] if retrieved_chunks and 'distance' in retrieved_chunks[0] else float('inf')
-        
         if not retrieved_chunks:
             retrieval_confidence = "WEAK"
-        elif best_distance <= 0.65:
-            retrieval_confidence = "STRONG"
-        elif best_distance <= 0.85:
-            retrieval_confidence = "MODERATE"
         else:
-            retrieval_confidence = "WEAK"
+            retrieval_confidence = "STRONG"  # PageIndex returns highly relevant logical sections
             
-        logger.info(f"Retrieval Confidence: {retrieval_confidence} (Best Distance: {best_distance if best_distance != float('inf') else 'N/A'})")
+        logger.info(f"Retrieval Confidence: {retrieval_confidence} (Vectorless RAG)")
         
         context_parts = []
         for i, chunk in enumerate(retrieved_chunks):

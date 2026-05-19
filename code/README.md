@@ -3,10 +3,10 @@
 ## 1. Project Overview
 This project is a production-grade, terminal-based support triage agent developed for the **HackerRank Orchestrate Hackathon**. It processes raw incoming support tickets from companies like HackerRank, Claude, and Visa, and autonomously decides whether to reply directly to the customer or escalate the ticket to a human agent.
 
-The solution relies entirely on the provided support corpus (`data/`) and a set of previously solved examples (`sample_support_tickets.csv`), utilizing 100% local, offline inference without external APIs.
+The solution now features a modern **Vectorless RAG** architecture utilizing **PageIndex**, moving away from traditional semantic embedding and chunking for enhanced reasoning-based retrieval and context integrity.
 
 ## 2. Problem Statement Summary
-Support teams are inundated with noisy, vague, and emotionally charged tickets. The objective is to build an intelligent orchestration pipeline capable of accurately classifying incoming tickets, retrieving relevant internal documentation, referencing past solved examples to match tone and decision-making, and executing a safe, retrieval-aware escalation process.
+Support teams are inundated with noisy, vague, and emotionally charged tickets. The objective is to build an intelligent orchestration pipeline capable of accurately classifying incoming tickets, retrieving relevant internal documentation logically (without arbitrary chunking), referencing past solved examples to match tone and decision-making, and executing a safe, retrieval-aware escalation process.
 
 ---
 
@@ -18,8 +18,8 @@ graph TD
     A[Incoming Ticket CSV] --> B[Ticket Preprocessor]
     B --> C{Redis Cache}
     C -- Cache HIT --> D[Return Cached Response]
-    C -- Cache MISS --> E[Example Retriever - Few-Shot FAISS]
-    E --> F[Hybrid Search - FAISS DB Container]
+    C -- Cache MISS --> E[Example Retriever - Keyword Search]
+    E --> F[Vectorless RAG - PageIndex]
     F --> G[LLM Orchestration]
     G --> H{Escalate or Reply?}
     H -- Reply --> I[Generate Response]
@@ -33,45 +33,41 @@ graph TD
 1. **Ticket Ingestion:** Tickets are read from `support_tickets.csv`.
 2. **Preprocessing:** The `Subject` field is analyzed. If it is noisy or vague, it is heavily down-weighted, and the `Issue` (body) field is prioritized as the core semantic payload.
 3. **Cache Lookup:** Redis checks if the ticket has been processed recently.
-4. **Few-Shot Retrieval:** The system fetches highly relevant solved tickets from an in-memory FAISS index built off `sample_support_tickets.csv`.
-5. **Hybrid Search:** The system retrieves the top relevant chunks from the main FAISS vector database container, utilizing both dense vector similarity and domain-based keyword filtering.
+4. **Few-Shot Retrieval:** The system fetches highly relevant solved tickets from `sample_support_tickets.csv` using keyword overlap.
+5. **Vectorless Retrieval:** The system retrieves relevant hierarchical sections from the indexed documentation via the **PageIndex** framework, replacing traditional FAISS embeddings.
 6. **Classification:** The LLM classifies the product area and request type using the few-shot examples.
-7. **Retrieval-Aware Escalation:** The system evaluates the FAISS vector distance (confidence score). Based on confidence and explicit rules, the LLM decides whether to reply or escalate.
-8. **Generation:** If confident, the LLM generates a grounded response.
+7. **Retrieval-Aware Escalation:** The system evaluates if relevant documentation was successfully found. Based on retrieval success and explicit rules, the LLM decides whether to reply or escalate.
+8. **Generation:** If confident, the LLM generates a grounded response using the retrieved vectorless context.
 9. **Persistence:** Output is written to `output.csv`.
 
 ---
 
 ## 4. Models Used
 
-- **Embedding Model:** `nomic-embed-text:latest`
-- **Inference LLM:** `llama3.2:latest`
+- **Inference LLM:** `llama3.2:latest` (via Ollama)
+- **Retrieval Engine:** PageIndex Vectorless RAG Framework
 
-**Why Local Models?**
-- **Zero Cost:** Avoids expensive API subscriptions.
-- **Data Privacy:** Internal support tickets and corporate knowledge never leave the local environment.
-- **Deterministic Iteration:** Faster, more predictable development cycles during the hackathon.
-- **Operational Simplicity:** Avoids rate limits, network latency, and external service outages.
-- **Terminal Integration:** Highly suited for headless, fast-executing terminal architectures.
+**Why Vectorless RAG?**
+- **No Artificial Chunking:** Preserves natural document sections (pages, headings) to maintain context and logical flow.
+- **Tree-based Navigation:** Enables the system to retrieve information based on document structure rather than just raw semantic similarity.
+- **Operational Simplicity:** Eliminates the need for maintaining embedding models and vector databases (like FAISS).
 
 ---
 
-## 5. Vector Database & Retrieval Pipeline
+## 5. Vectorless Retrieval Pipeline
 
 ### Retrieval Pipeline Diagram
 ```mermaid
 graph LR
-    A[Ticket Body] --> B[nomic-embed-text Llama]
-    B --> C[Dense Vector Search]
-    B --> D[Domain Keyword Filter]
-    C --> E[Hybrid FAISS DB]
-    D --> E
-    E --> F[Top-K Context Chunks]
+    A[Ticket Body] --> B[PageIndex Query Submit]
+    B --> C[Hierarchical Tree Search]
+    C --> D[Retrieve Relevant Logical Pages]
+    D --> E[Full Page Context Returned to LLM]
 ```
 
 **Implementation Details:**
-- **Main Support Knowledge (FAISS DB Container):** The `data/` directory is chunked and embedded into a containerized FAISS database exposed via a REST API. It handles the core ground truth knowledge.
-- **Few-Shot Examples (In-Memory FAISS):** The `sample_support_tickets.csv` is loaded into a fast, temporary in-memory FAISS index. This ensures tone/formatting examples are not mixed with factual documentation, preventing severe LLM hallucinations during generation.
+- **Main Support Knowledge (PageIndex):** The `data/` directory markdown files are merged by domain and submitted to PageIndex, which builds a structural tree index for highly accurate, vectorless retrieval.
+- **Few-Shot Examples (Keyword Engine):** `sample_support_tickets.csv` is loaded into a fast, temporary memory array and searched via exact term overlap. This keeps tone/formatting examples strictly separate from factual knowledge.
 
 ---
 
@@ -80,10 +76,9 @@ graph LR
 ### Escalation Decision Flow
 ```mermaid
 graph TD
-    A[Top-K Retrieved Context] --> B{Calculate Vector Distance}
-    B -- Distance < 0.65 --> C[STRONG Confidence]
-    B -- Distance < 0.85 --> D[MODERATE Confidence]
-    B -- Distance > 0.85 --> E[WEAK Confidence]
+    A[Vectorless Retrieved Context] --> B{Did PageIndex find context?}
+    B -- Yes --> C[STRONG Confidence]
+    B -- No --> E[WEAK Confidence]
     
     C --> F{Is there a Strict Rule? e.g. Fraud, Impossibility}
     F -- Yes --> G[Escalate]
@@ -93,9 +88,8 @@ graph TD
 ```
 
 **Refined Behavior:**
-Early prototypes suffered from over-escalation (e.g., escalating simply because a user typed "I want a human agent"). The logic is now strictly **retrieval-aware**:
-- If retrieval confidence is **STRONG**, the system prioritizes direct resolution, deliberately ignoring emotional human-support requests. Grounded-response-first strategy applies.
-- Escalation is strictly reserved for fraud, account compromise, physical limitations (e.g., banning merchants, overriding recruiter scores), and scenarios with **WEAK** retrieval confidence.
+- If retrieval is successful via PageIndex, the system prioritizes direct resolution, deliberately ignoring emotional human-support requests.
+- Escalation is strictly reserved for fraud, account compromise, physical limitations, and scenarios where PageIndex returns no relevant logical sections.
 
 ---
 
@@ -103,17 +97,15 @@ Early prototypes suffered from over-escalation (e.g., escalating simply because 
 
 To optimize throughput and ensure idempotency:
 - Every processed ticket payload is hashed and stored in Redis (port 6379).
-- If the exact same ticket payload is re-submitted, the system triggers a **Cache HIT** and immediately returns the previously generated classification, escalation decision, and response.
-- This bypasses the costly embedding and LLM inference phases entirely, turning minutes of processing into milliseconds.
+- If the exact same ticket payload is re-submitted, the system triggers a **Cache HIT** and immediately returns the previously generated results, bypassing LLM processing.
 
 ---
 
 ## 8. Engineering & Design Decisions
 
-- **Why Retrieval-Augmented Few-Shot Prompting?** Rather than injecting static examples into the prompt, dynamically retrieving the most semantically similar past ticket ensures the LLM sees highly relevant precedent for tone and routing.
-- **Why Hybrid Search?** Vector similarity alone often struggles with hard domain boundaries. We combined FAISS L2 similarity with explicit domain string filtering (`claude`, `visa`, `hackerrank`) to guarantee domain isolation.
-- **Why prioritize the Ticket Body (`Issue`)?** Support subjects are notoriously noisy, vague, or click-bait ("HELP URGENT"). We aggressively down-weight the subject during embedding and inference to force semantic matching on the actual problem.
-- **Why avoid Memory Chains?** Support triage is inherently stateless. Implementing conversational memory chains would cause cross-ticket context bleed, leading to catastrophic hallucinations where the agent applies context from Ticket A to Ticket B.
+- **Why Vectorless RAG?** Traditional RAG using FAISS chunks texts blindly, breaking context. PageIndex navigates the document logically as a human would, resulting in fewer hallucinations on structured docs.
+- **Why prioritize the Ticket Body (`Issue`)?** Support subjects are notoriously noisy or click-bait ("HELP URGENT"). We aggressively down-weight the subject during inference to match on the actual problem.
+- **Why avoid Memory Chains?** Support triage is inherently stateless. Memory chains would cause cross-ticket context bleed, misapplying context from one user's ticket to another.
 
 ---
 
@@ -124,14 +116,13 @@ To optimize throughput and ensure idempotency:
 - Install [Ollama](https://ollama.com/)
 - Install [uv](https://github.com/astral-sh/uv) (Python package manager)
 
-### 1. Pull the Models
-Ensure you pull both models locally before starting:
+### 1. Pull the Model
+Ensure you pull the language model locally before starting:
 ```bash
 ollama pull llama3.2:latest
-ollama pull nomic-embed-text:latest
 ```
 
-### 2. Start the Infrastructure (Redis & FAISS)
+### 2. Start the Infrastructure (Redis)
 Ensure you are in the `code/` directory.
 ```bash
 docker compose up -d --build
@@ -142,27 +133,28 @@ Using `uv` package manager:
 ```bash
 uv venv
 source .venv/bin/activate  # On macOS/Linux
-uv sync                    # Ensure dependencies from pyproject.toml / requirements are met
+uv sync                    # Ensure dependencies from pyproject.toml are met
 ```
-*(If dependencies are missing, install them via `uv add langchain-ollama faiss-cpu redis httpx numpy pandas`)*
+*(Ensure `pageindex` is added to your project via `uv add pageindex`)*
 
 ### 4. Index the Knowledge Base
-Chunk and store the `data/` folder into the FAISS container:
+Submit the `data/` folder into PageIndex:
+Ensure you set your API key if required:
 ```bash
-uv run python indexer.py
+export PAGEINDEX_API_KEY="your_api_key_here"
+uv run python app/indexing/indexer.py
 ```
 
 ### 5. Run the Orchestration Pipeline
 Process the incoming tickets from `support_tickets.csv`:
 ```bash
-uv run python main.py
+uv run python app/main.py
 ```
 
 ### Reset & Troubleshooting Commands
-To completely wipe the cache and vector DB for a fresh run:
+To completely wipe the cache:
 ```bash
 docker exec -it orchestrate_redis redis-cli FLUSHALL
-curl -X POST http://localhost:8000/reset
 ```
 
 ---

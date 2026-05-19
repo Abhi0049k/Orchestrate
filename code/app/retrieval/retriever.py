@@ -1,56 +1,69 @@
-from retrieval.embeddings import get_embedding
-from retrieval.vector_db_client import search_vectors
+import os
+import time
+import json
+from pageindex import PageIndexClient
 
-def hybrid_search(query: str, domain_filter: str = None, top_k: int = 5):
-    """
-    Retrieves the most relevant chunks from the FAISS Vector DB using a hybrid approach.
-    It first fetches a larger pool of semantically similar vectors (top_k * 3), 
-    then filters/reranks based on the domain (if provided) and keywords.
-    """
-    # 1. Vector Search for initial semantic retrieval
-    query_vec = get_embedding(query)
-    
-    # Retrieve a larger set to allow for filtering without missing out
-    initial_k = top_k * 3 
-    raw_results = search_vectors(query_vec, k=initial_k)
-    
-    # 2. Reranking and Filtering
-    filtered_results = []
-    query_keywords = set(query.lower().split())
-    
-    for res in raw_results:
-        payload = res.get("payload", {})
+PI_API_KEY = os.environ.get("PAGEINDEX_API_KEY", "dummy_key")
+pi_client = PageIndexClient(api_key=PI_API_KEY)
+
+def get_doc_id_for_domain(domain: str) -> str:
+    try:
+        with open("doc_ids.json", "r") as f:
+            mapping = json.load(f)
+        return mapping.get(domain)
+    except Exception:
+        return None
+
+def retrieve_from_pageindex(query: str, doc_id: str, top_k: int = 3):
+    if not doc_id:
+        return []
         
-        # Strict Domain Filtering: Skip if domain doesn't match
-        if domain_filter and payload.get("domain") != domain_filter:
-            continue
+    try:
+        response = pi_client.submit_query(doc_id=doc_id, query=query)
+        retrieval_id = response.get("retrieval_id")
+        if not retrieval_id:
+            return []
             
-        # Optional Hybrid Reranking Logic: 
-        # For this hackathon, we can apply a naive keyword match penalty.
-        # If the chunk contains keywords from the query, we conceptually "boost" it
-        # by artificially lowering its L2 distance (lower distance = more similar).
-        chunk_text = payload.get("text", "").lower()
-        chunk_keywords = set(chunk_text.split())
+        while True:
+            retrieval = pi_client.get_retrieval(retrieval_id)
+            status = retrieval.get("status")
+            if status == "completed":
+                break
+            elif status == "failed":
+                return []
+            time.sleep(1)
         
-        overlap = query_keywords.intersection(chunk_keywords)
-        bonus = len(overlap) * 0.05 # Adjust bonus weight as needed
-        
-        # In FAISS L2, lower distance is better, so we subtract the bonus
-        adjusted_distance = res.get("distance", 0) - bonus
-        res["distance"] = max(0, adjusted_distance) # prevent negative distance
-        
-        filtered_results.append(res)
-        
-    # Re-sort based on adjusted distance
-    filtered_results.sort(key=lambda x: x["distance"])
+        nodes = retrieval.get("retrieved_nodes", [])
+        contexts = []
+        for node in nodes[:top_k]:
+            relevant_contents = node.get("relevant_contents", [])
+            for group in relevant_contents:
+                for item in group:
+                    content = item.get("relevant_content")
+                    if content:
+                        # Format similar to what pipeline expects
+                        contexts.append({"payload": {"text": content}})
+        return contexts
+    except Exception as e:
+        print(f"Error retrieving from PageIndex: {e}")
+        return []
+
+def hybrid_search(query: str, domain_filter: str = None, top_k: int = 3):
+    """
+    Retrieves the most relevant chunks using PageIndex Vectorless RAG approach.
+    """
+    doc_id = get_doc_id_for_domain(domain_filter) if domain_filter else None
     
-    # Return the top K items
-    return filtered_results[:top_k]
+    if not doc_id:
+        return []
+    
+    # Vectorless RAG using PageIndex
+    contexts = retrieve_from_pageindex(query, doc_id, top_k=top_k)
+    return contexts
 
 if __name__ == "__main__":
-    # Simple test case when run standalone
     sample_query = "How do I reset my HackerRank password?"
-    print(f"Testing hybrid search for: '{sample_query}'")
+    print(f"Testing vectorless search for: '{sample_query}'")
     results = hybrid_search(sample_query, domain_filter="hackerrank")
     for r in results:
-        print(f"Distance: {r['distance']:.4f} | Source: {r['payload'].get('source')} | Text: {r['payload'].get('text')[:60]}...")
+        print(f"Text: {r['payload'].get('text')[:60]}...")

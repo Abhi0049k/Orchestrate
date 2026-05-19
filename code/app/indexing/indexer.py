@@ -1,83 +1,70 @@
 import os
+import json
+import time
 from pathlib import Path
-from retrieval.embeddings import get_embeddings_batch
-from retrieval.vector_db_client import add_vectors, reset_db
+from pageindex import PageIndexClient
 
-def chunk_text(text: str, max_words=150, overlap_words=30) -> list[str]:
-    """Splits text into smaller overlapping chunks for precise retrieval."""
-    words = text.split()
-    chunks = []
-    if not words:
-        return chunks
-    
-    i = 0
-    while i < len(words):
-        chunk = " ".join(words[i:i + max_words])
-        chunks.append(chunk)
-        i += max_words - overlap_words
-        
-    return chunks
+PI_API_KEY = os.environ.get("PAGEINDEX_API_KEY", "dummy_key")
+pi_client = PageIndexClient(api_key=PI_API_KEY)
 
 def index_corpus(data_dir: str):
-    """Reads all markdown files from the data directory, chunks them, and indexes into FAISS."""
-    print("Resetting FAISS index...")
-    reset_db()
-    
+    """Submits all markdown files to PageIndex and saves their doc_ids."""
     data_path = Path(data_dir)
     md_files = list(data_path.rglob("*.md"))
     
-    print(f"Found {len(md_files)} markdown files in {data_dir}. Beginning indexing...")
+    print(f"Found {len(md_files)} markdown files in {data_dir}. Beginning indexing with PageIndex...")
     
-    vectors_batch = []
-    payloads_batch = []
-    batch_size = 50
-    total_indexed = 0
-
+    doc_ids_mapping = {}
+    
+    # Merge markdown files per domain
+    domain_texts = {}
     for file_path in md_files:
-        try:
-            content = file_path.read_text(encoding="utf-8")
-        except Exception as e:
-            print(f"Skipping {file_path} due to read error: {e}")
-            continue
-            
-        # The first folder inside data/ determines the domain (e.g. claude, hackerrank, visa)
         rel_path = file_path.relative_to(data_path)
         domain = rel_path.parts[0] if len(rel_path.parts) > 0 else "unknown"
         
-        chunks = chunk_text(content)
-        for i, chunk in enumerate(chunks):
-            # Contextualize the chunk for better embedding representation
-            context_chunk = f"[{domain.upper()}] {chunk}"
+        try:
+            content = file_path.read_text(encoding="utf-8")
+            if domain not in domain_texts:
+                domain_texts[domain] = []
+            domain_texts[domain].append(content)
+        except Exception as e:
+            print(f"Skipping {file_path} due to read error: {e}")
             
-            try:
-                vec = get_embeddings_batch([context_chunk])[0]
-            except Exception as e:
-                print(f"Error generating embedding for chunk {i} of {file_path}: {e}")
-                continue
-                
-            vectors_batch.append(vec)
-            payloads_batch.append({
-                "source": str(file_path),
-                "domain": domain,
-                "chunk_id": i,
-                "text": chunk
-            })
+    for domain, texts in domain_texts.items():
+        combined_text = "\n\n".join(texts)
+        # Write to a temp file
+        temp_file = data_path / f"{domain}_combined.md"
+        temp_file.write_text(combined_text, encoding="utf-8")
+        
+        try:
+            doc_info = pi_client.submit_document(str(temp_file))
+            doc_id = doc_info["doc_id"]
+            doc_ids_mapping[domain] = doc_id
+            print(f"Submitted document for domain '{domain}', doc_id: {doc_id}")
             
-            if len(vectors_batch) >= batch_size:
-                add_vectors(vectors_batch, payloads_batch)
-                total_indexed += len(vectors_batch)
-                print(f"Indexed {total_indexed} chunks...")
-                vectors_batch = []
-                payloads_batch = []
+            # Wait for it to be ready
+            print(f"Waiting for document {doc_id} to be indexed...")
+            max_retries = 30
+            retry_count = 0
+            while not pi_client.is_retrieval_ready(doc_id):
+                if retry_count >= max_retries:
+                    print("Timeout: Document processing took too long.")
+                    break
+                time.sleep(5)
+                retry_count += 1
                 
-    # Index remaining
-    if vectors_batch:
-        add_vectors(vectors_batch, payloads_batch)
-        total_indexed += len(vectors_batch)
-        print(f"Indexed {total_indexed} chunks...")
-
+        except Exception as e:
+            print(f"Error submitting to PageIndex: {e}")
+            
+        finally:
+            if temp_file.exists():
+                temp_file.unlink()
+                
+    # Save mapping to json
+    with open("doc_ids.json", "w") as f:
+        json.dump(doc_ids_mapping, f)
+        
     print("Indexing complete.")
 
 if __name__ == "__main__":
-    # Assumes the script is run from inside the `code` directory
     index_corpus("../data")
